@@ -1,0 +1,29 @@
+name: IG 發文
+on:
+  schedule:
+    - cron: "0 12 * * 2"   # 週二 20:00 台灣（UTC+8）
+    - cron: "0 13 * * 6"   # 週六 21:00 台灣
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1＝只建草稿不發佈"
+        default: "1"
+permissions:
+  contents: write
+  issues: write
+concurrency: ig-publish
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 publish.py
+        env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || '0' }}
+          GH_TOKEN: ${{ github.token }}
+      - if: github.event_name == 'schedule' || inputs.dry_run != '1'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A queue && git diff --cached --quiet || (git commit -m "已發佈" && git push)
