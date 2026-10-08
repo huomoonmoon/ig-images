@@ -15,15 +15,56 @@ TOKEN = os.environ["IG_TOKEN"]
 DRY = os.environ.get("DRY_RUN") == "1"
 
 
-def call(method, path, **params):
+def call(method, path, tries=3, **params):
     data = urllib.parse.urlencode(params).encode() if method == "POST" else None
     url = f"{API}/{path}" + ("" if method == "POST" else "?" + urllib.parse.urlencode(params))
     req = urllib.request.Request(url, data=data, method=method, headers={"Authorization": f"Bearer {TOKEN}"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        raise SystemExit(f"API 錯誤 {path}：{e.read().decode()[:300]}")
+    for i in range(tries):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            err = e.read().decode()[:300]
+            retry = '"is_transient":true' in err or e.code >= 500
+        except urllib.error.URLError as e:
+            err, retry = str(e.reason), True
+        if not retry or i + 1 == tries:
+            raise SystemExit(f"API 錯誤 {path}：{err}")
+        print(f"暫時性錯誤，{i + 1} 分鐘後重試 {path}：{err}")
+        time.sleep(60 * (i + 1))
+
+
+def publish(cid):
+    """media_publish 不能盲目重試：失敗後先看容器是否其實已發佈，避免同一篇發兩次。"""
+    for i in range(3):
+        try:
+            return call("POST", f"{IG_ID}/media_publish", tries=1, creation_id=cid)["id"]
+        except SystemExit as e:
+            print(e)
+            time.sleep(60)
+            if call("GET", cid, fields="status_code").get("status_code") == "PUBLISHED":
+                return call("GET", f"{IG_ID}/media", fields="id", limit=1)["data"][0]["id"]
+    raise SystemExit("media_publish 重試 3 次仍失敗")
+
+
+SLOTS = {1: 12, 5: 13}  # 週二 12:00 UTC（台灣 20:00）、週六 13:00 UTC（台灣 21:00）
+
+
+def wait_for_slot():
+    """GitHub 排程常延遲數小時，所以 cron 提早觸發，在這裡等到發文時間。"""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for d in glob.glob("queue/post-*/published.json"):  # 同一時段已有別的 run 發過就不再發
+        t = datetime.datetime.fromisoformat(json.load(open(d))["published_at"].rstrip("Z")).replace(tzinfo=datetime.timezone.utc)
+        if now - t < datetime.timedelta(hours=12):
+            raise SystemExit(0)
+    target = now.replace(hour=SLOTS[now.weekday()], minute=0, second=0, microsecond=0)
+    wait = (target - now).total_seconds()
+    if wait > 5.5 * 3600:  # 超過 job 時限，交給較晚那個 cron
+        print("離發文時間太久，交給下一個排程")
+        raise SystemExit(0)
+    if wait > 0:
+        print(f"等 {wait / 60:.0f} 分鐘到 {target:%H:%M} UTC")
+        time.sleep(wait)
 
 
 def pending():
@@ -56,7 +97,7 @@ def main():
     if DRY:
         print(f"[dry-run] {post}：{len(kids)} 張已建成輪播草稿，未發佈")
         return
-    mid = call("POST", f"{IG_ID}/media_publish", creation_id=cid)["id"]
+    mid = publish(cid)
     link = call("GET", mid, fields="permalink").get("permalink", "")
     json.dump({"published_at": datetime.datetime.utcnow().isoformat() + "Z", "media_id": mid, "permalink": link},
               open(f"{post}/published.json", "w"), ensure_ascii=False, indent=1)
@@ -69,4 +110,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if os.environ.get("SCHEDULED") == "1":
+        wait_for_slot()
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (None, 0) and not DRY:  # 失敗就開 issue，GitHub 會寄信通知
+            subprocess.run(["gh", "issue", "create", "-t", "IG 發文失敗",
+                            "-b", f"{e.code}\n\n記錄：{os.environ.get('RUN_URL', '')}"], check=False)
+        raise

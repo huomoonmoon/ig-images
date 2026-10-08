@@ -1,8 +1,9 @@
 name: IG 發文
 on:
   schedule:
-    - cron: "0 12 * * 2"   # 週二 20:00 台灣（UTC+8）
-    - cron: "0 13 * * 6"   # 週六 21:00 台灣
+    # GitHub 排程實測延遲 4–5 小時，所以提早觸發、由 publish.py 等到發文時間
+    - cron: "17 5,8 * * 2"   # 週二，等到 20:00 台灣（UTC+8）發
+    - cron: "17 6,9 * * 6"   # 週六，等到 21:00 台灣發
   workflow_dispatch:
     inputs:
       dry_run:
@@ -15,6 +16,7 @@ concurrency: ig-publish
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - run: python3 publish.py
@@ -22,6 +24,8 @@ jobs:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || '0' }}
           GH_TOKEN: ${{ github.token }}
+          SCHEDULED: ${{ github.event_name == 'schedule' && '1' || '0' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       - if: github.event_name == 'schedule' || inputs.dry_run != '1'
         run: |
           git config user.name "github-actions[bot]"
