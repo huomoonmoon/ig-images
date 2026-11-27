@@ -67,6 +67,35 @@ def wait_for_slot():
         time.sleep(wait)
 
 
+def wait_finished(cid, what):
+    for _ in range(30):
+        s = call("GET", cid, fields="status_code").get("status_code")
+        if s == "FINISHED":
+            return
+        if s in ("ERROR", "EXPIRED"):
+            raise SystemExit(f"{what}容器狀態 {s}")
+        time.sleep(10)
+    raise SystemExit(f"{what}容器 5 分鐘內沒處理完")
+
+
+def story(post):
+    """發完輪播順便發限動（霍霍 2026-11-27）：用 story.jpg（封面補成 9:16），沒有就用 01.jpg。
+    API 發的限動不能附「回到貼文」的連結貼紙，只是封面圖。失敗只回報，不影響已發的輪播。"""
+    img = f"{post}/story.jpg" if os.path.exists(f"{post}/story.jpg") else f"{post}/01.jpg"
+    try:
+        sid = call("POST", f"{IG_ID}/media", media_type="STORIES", image_url=f"{PAGES}/{img}")["id"]
+        wait_finished(sid, "限動")
+        if DRY:
+            print(f"[dry-run] 限動容器已建好（{img}），未發佈")
+            return
+        print(f"已發限動 {call('POST', f'{IG_ID}/media_publish', tries=1, creation_id=sid)['id']}")
+    except SystemExit as e:
+        print(f"限動失敗：{e.code}")
+        if not DRY:
+            subprocess.run(["gh", "issue", "create", "-t", "IG 限動發文失敗（輪播已發）",
+                            "-b", f"{post}：{e.code}\n\n記錄：{os.environ.get('RUN_URL', '')}"], check=False)
+
+
 def pending():
     return [d for d in sorted(glob.glob("queue/post-*")) if not os.path.exists(f"{d}/published.json")]
 
@@ -85,23 +114,17 @@ def main():
         urllib.request.urlopen(urllib.request.Request(u, method="HEAD"), timeout=30)
     kids = [call("POST", f"{IG_ID}/media", image_url=u, is_carousel_item="true")["id"] for u in urls]
     cid = call("POST", f"{IG_ID}/media", media_type="CAROUSEL", children=",".join(kids), caption=caption)["id"]
-    for _ in range(30):
-        s = call("GET", cid, fields="status_code").get("status_code")
-        if s == "FINISHED":
-            break
-        if s in ("ERROR", "EXPIRED"):
-            raise SystemExit(f"輪播容器狀態 {s}")
-        time.sleep(10)
-    else:
-        raise SystemExit("輪播容器 5 分鐘內沒處理完")
+    wait_finished(cid, "輪播")
     if DRY:
         print(f"[dry-run] {post}：{len(kids)} 張已建成輪播草稿，未發佈")
+        story(post)
         return
     mid = publish(cid)
     link = call("GET", mid, fields="permalink").get("permalink", "")
     json.dump({"published_at": datetime.datetime.utcnow().isoformat() + "Z", "media_id": mid, "permalink": link},
               open(f"{post}/published.json", "w"), ensure_ascii=False, indent=1)
     print(f"已發佈 {post} {link}")
+    story(post)
     left = len(pending())
     print(f"剩餘存稿 {left} 篇")
     if left <= 2:  # 開 issue，GitHub 會寄信通知
